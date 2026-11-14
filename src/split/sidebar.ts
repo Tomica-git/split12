@@ -19,14 +19,15 @@ export function createSidebar(callbacks: SidebarCallbacks) {
   element.setAttribute('aria-label', text.sessions);
   element.innerHTML = `<div class="sidebar-heading"><strong>${text.sessions}</strong><button type="button" class="sidebar-close" aria-label="セッション一覧を閉じる">×</button></div>
 <div class="sidebar-target" aria-live="polite"></div>
-<div class="sidebar-actions"><button type="button" class="view-open">開く</button><button type="button" class="view-delete">削除</button><button type="button" class="view-create" aria-label="${text.newView}">追加</button><button type="button" class="view-edit" aria-pressed="false" aria-label="一覧を編集">編集</button></div>
+<div class="sidebar-actions"><button type="button" class="view-rename"><span class="action-icon" aria-hidden="true">✏️</span><span class="action-label">命名</span></button><button type="button" class="view-delete"><span class="action-icon" aria-hidden="true">❌</span><span class="action-label">削除</span></button><button type="button" class="view-create" aria-label="${text.newView}"><span class="action-icon" aria-hidden="true">➕</span><span class="action-label">追加</span></button><button type="button" class="view-edit" aria-pressed="false" aria-label="一覧を編集"><span class="action-icon" aria-hidden="true">📖</span><span class="action-label">編集</span></button></div>
 <div class="sidebar-edit-actions" hidden><span class="sidebar-edit-count" aria-live="polite">0件選択</span><button type="button" class="view-delete-selected" disabled>選択を削除</button></div>
+<p class="sidebar-edit-hint" hidden>名前をドラッグして別の行で離すと、その2つだけを入れ替えます。☰ をドラッグすると間に移動します。</p>
 <nav class="view-list" aria-label="${text.viewList}"></nav>
-<p class="sidebar-hint">クリックで選択、ダブルクリックで開きます。名前の変更は右クリックかF2、並べ替えと複数削除は「編集」から。</p>`;
+<p class="sidebar-hint">クリックで選択、ダブルクリックで開きます。名前の変更は「命名」かF2、並べ替えと複数削除は「編集」から。全部の枠が空で開いていないビューは自動で削除します。</p>`;
   element.querySelector('.view-create')!.addEventListener('click', callbacks.create);
   element.querySelector('.sidebar-close')!.addEventListener('click', callbacks.closeSidebar);
   const list = element.querySelector<HTMLElement>('.view-list')!;
-  const openButton = element.querySelector<HTMLButtonElement>('.view-open')!, deleteButton = element.querySelector<HTMLButtonElement>('.view-delete')!;
+  const renameButton = element.querySelector<HTMLButtonElement>('.view-rename')!, deleteButton = element.querySelector<HTMLButtonElement>('.view-delete')!;
   const editButton = element.querySelector<HTMLButtonElement>('.view-edit')!, editActions = element.querySelector<HTMLElement>('.sidebar-edit-actions')!;
   const editCount = element.querySelector<HTMLElement>('.sidebar-edit-count')!, deleteSelected = element.querySelector<HTMLButtonElement>('.view-delete-selected')!;
   let rows: ViewSummary[] = [];
@@ -50,16 +51,17 @@ export function createSidebar(callbacks: SidebarCallbacks) {
   function updateActions(): void {
     const view = rows.find(item => item.id === focusedId);
     element.querySelector('.sidebar-target')!.textContent = view ? `操作対象: ${view.title}` : '操作対象なし';
-    openButton.disabled = !view || view.id === currentId; deleteButton.disabled = !view;
-    openButton.setAttribute('aria-label', view ? `${view.title} を開く` : '開く');
+    renameButton.disabled = !view; deleteButton.disabled = !view;
+    renameButton.setAttribute('aria-label', view ? `${view.title} を命名` : '命名');
     deleteButton.setAttribute('aria-label', view ? `${view.title} を削除` : '削除');
     for (const button of list.querySelectorAll<HTMLButtonElement>('.view-choice')) { button.dataset.selected = String(button.dataset.view === focusedId); button.tabIndex = button.dataset.view === focusedId ? 0 : -1; }
   }
   function updateEditCount(): void { editCount.textContent = `${selectedIds.size}件選択`; deleteSelected.disabled = !selectedIds.size; }
   function setEditing(value: boolean): void {
     editing = value;
-    editButton.setAttribute('aria-pressed', String(value)); editButton.textContent = value ? '完了' : '編集';
-    editActions.hidden = !value; element.classList.toggle('editing', value);
+    editButton.setAttribute('aria-pressed', String(value));
+    editButton.querySelector('.action-icon')!.textContent = value ? '✅' : '📖'; editButton.querySelector('.action-label')!.textContent = value ? '完了' : '編集';
+    editActions.hidden = !value; element.querySelector<HTMLElement>('.sidebar-edit-hint')!.hidden = !value; element.classList.toggle('editing', value);
     if (!value) selectedIds.clear();
     updateEditCount(); render(rows);
   }
@@ -68,8 +70,54 @@ export function createSidebar(callbacks: SidebarCallbacks) {
     const views = rows.filter(view => selectedIds.has(view.id));
     if (views.length) void callbacks.removeMany(views).then(() => { selectedIds.clear(); updateEditCount(); });
   });
-  openButton.addEventListener('click', () => { const view = rows.find(item => item.id === focusedId); if (view && view.id !== currentId) void callbacks.focus(view.id); });
+  renameButton.addEventListener('click', () => { const view = rows.find(item => item.id === focusedId); if (view) callbacks.rename(view); });
   deleteButton.addEventListener('click', () => { const view = rows.find(item => item.id === focusedId); if (view) callbacks.remove(view); });
+  // Edit mode: dragging a name and releasing it on another row swaps just those two views; rows between stay (R-97).
+  let swapping: (() => void) | undefined;
+  function swapViews(a: string, b: string): void {
+    const ids = rows.map(view => view.id), i = ids.indexOf(a), j = ids.indexOf(b);
+    if (i < 0 || j < 0 || i === j) return;
+    [ids[i], ids[j]] = [ids[j]!, ids[i]!];
+    void callbacks.reorder(ids);
+  }
+  function beginSwap(event: PointerEvent, id: string): void {
+    if (event.button !== 0 || !event.isPrimary || event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) return;
+    swapping?.();
+    const startX = event.clientX, startY = event.clientY;
+    let moved = false, target: string | undefined;
+    const rowOf = (view: string) => list.querySelector<HTMLElement>(`.view-row[data-view="${view}"]`);
+    const mark = () => {
+      list.querySelectorAll('.swap-source, .swap-target').forEach(item => item.classList.remove('swap-source', 'swap-target'));
+      if (!moved) return;
+      rowOf(id)?.classList.add('swap-source');
+      if (target) rowOf(target)?.classList.add('swap-target');
+    };
+    const move = (next: PointerEvent) => {
+      if (next.pointerId !== event.pointerId) return;
+      // A release that reached a page frame still ends the swap at the next move here.
+      if (!(next.buttons & 1)) { up(next); return; }
+      if (!moved && Math.hypot(next.clientX - startX, next.clientY - startY) < 4) return;
+      if (!moved) { moved = true; element.classList.add('swapping'); document.body.classList.add('pointer-shield'); }
+      const over = document.elementFromPoint(next.clientX, next.clientY)?.closest<HTMLElement>('.view-row');
+      target = over && list.contains(over) && over.dataset.view !== id ? over.dataset.view : undefined;
+      mark();
+    };
+    const cleanup = () => {
+      window.removeEventListener('pointermove', move, true); window.removeEventListener('pointerup', up, true);
+      window.removeEventListener('pointercancel', cleanup, true); window.removeEventListener('blur', cleanup); window.removeEventListener('keydown', key, true);
+      moved = false; mark(); element.classList.remove('swapping'); document.body.classList.remove('pointer-shield'); swapping = undefined;
+    };
+    const up = (next: PointerEvent) => {
+      if (next.pointerId !== event.pointerId) return;
+      const to = moved ? target : undefined;
+      cleanup();
+      if (to) swapViews(id, to);
+    };
+    const key = (next: KeyboardEvent) => { if (next.key === 'Escape') { next.preventDefault(); next.stopPropagation(); cleanup(); } };
+    window.addEventListener('pointermove', move, true); window.addEventListener('pointerup', up, true);
+    window.addEventListener('pointercancel', cleanup, true); window.addEventListener('blur', cleanup); window.addEventListener('keydown', key, true);
+    swapping = cleanup;
+  }
   function reorderTo(id: string, position: number): void {
     const ids = rows.map(view => view.id).filter(item => item !== id);
     ids.splice(Math.max(0, Math.min(ids.length, position)), 0, id);
@@ -93,6 +141,8 @@ export function createSidebar(callbacks: SidebarCallbacks) {
       button.addEventListener('keydown', event => { if (event.key === 'F2') { event.preventDefault(); callbacks.rename(view); } });
       button.addEventListener('contextmenu', event => { event.preventDefault(); button.focus(); openMenu(view, event.clientX, event.clientY); });
       if (!editing) { row.append(button); return row; }
+      button.title = 'ドラッグして別の行で離すと入れ替え';
+      button.addEventListener('pointerdown', event => beginSwap(event, view.id));
       const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.className = 'view-select'; checkbox.checked = selectedIds.has(view.id);
       checkbox.setAttribute('aria-label', `${view.title} を選択`);
       checkbox.addEventListener('change', () => { if (checkbox.checked) selectedIds.add(view.id); else selectedIds.delete(view.id); updateEditCount(); });
@@ -110,11 +160,8 @@ export function createSidebar(callbacks: SidebarCallbacks) {
         const position = rows.findIndex(item => item.id === view.id) - (rows.findIndex(item => item.id === from) < index ? 1 : 0);
         reorderTo(from, position);
       });
-      const up = document.createElement('button'); up.type = 'button'; up.className = 'view-move view-move-up'; up.textContent = '▲'; up.setAttribute('aria-label', `${view.title} を上へ`); up.disabled = index === 0;
-      up.addEventListener('click', () => reorderTo(view.id, index - 1));
-      const down = document.createElement('button'); down.type = 'button'; down.className = 'view-move view-move-down'; down.textContent = '▼'; down.setAttribute('aria-label', `${view.title} を下へ`); down.disabled = index === rows.length - 1;
-      down.addEventListener('click', () => reorderTo(view.id, index + 1));
-      row.append(checkbox, handle, button, up, down);
+      // The ▲▼ buttons were removed: dragging the name (swap) or ☰ (move) covers reordering (R-97).
+      row.append(checkbox, handle, button);
       return row;
     }));
     updateActions();

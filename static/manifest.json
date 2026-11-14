@@ -2,8 +2,8 @@
   "manifest_version": 3,
   "minimum_chrome_version": "128",
   "name": "Split12（最大12分割ビュー）",
-  "version": "0.1.97",
-  "version_name": "0.1.97f",
+  "version": "1.0.0",
+  "version_name": "1.0.0",
   "description": "1つのタブに最大12のWebページを並べます。",
   "permissions": [
     "declarativeNetRequestWithHostAccess",
@@ -11,6 +11,7 @@
     "storage",
     "contextMenus",
     "tabs",
+    "history",
     "favicon",
     "browsingData",
     "cookies",

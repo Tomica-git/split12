@@ -92,8 +92,13 @@ async function openOrFocusSplitViewImpl(): Promise<number> {
 }
 export const openOrFocusSplitView = (): Promise<number> => serial(openOrFocusSplitViewImpl);
 
+// One Split12 per window (R-93): the action shows this window's Split12, or opens a new view next to the pressed tab.
 export const openNewViewFromAction = (source: chrome.tabs.Tab): Promise<number> => serial(async () => {
   if (source.windowId === undefined || source.index === undefined) throw new Error('操作元のタブを確認できません');
+  const inWindow = (await chrome.tabs.query({ windowId: source.windowId })).filter(tab => tab.id !== undefined && (isSplitUrl(tab.url) || isSplitUrl(tab.pendingUrl)));
+  const existing = inWindow.find(tab => tab.id === source.id) ?? inWindow.sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0))[0];
+  if (existing?.id !== undefined) { await focusTab(existing); return existing.id; }
+  // 2026-11-12 user decision B: open it in this window, so pressing again shows it instead of adding more.
   const tab = await chrome.tabs.create({ url: `${splitBase}?view=${crypto.randomUUID()}`, windowId: source.windowId, index: source.index + 1, active: true });
   if (tab.id === undefined) throw new Error('分割ビューを開けませんでした');
   await rememberTab(tab.id);

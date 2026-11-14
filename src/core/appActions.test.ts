@@ -3,9 +3,11 @@ import { appActionForKey, isAppAction } from './appActions';
 import { parseViewRegistry, validViewId, viewIdFromUrl, viewWorkspaceKey } from './views';
 
 const key = (value: string, modifiers: Partial<KeyboardEvent> = {}): KeyboardEvent => ({ key: value, code: '', metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, isComposing: false, repeat: false, ...modifiers } as KeyboardEvent);
-test('R-17 削除・配置履歴・枠追加はMacとCtrlの同じ操作へ対応する', () => {
+test('R-17 R-69 配置履歴・枠追加はMacとCtrlで同じで、Shift+Dは⌘なら右に追加・Ctrlなら削除', () => {
+  // R-69 reassigned ⌘⇧D to 「固定枠の右に追加」; deleting stays on Ctrl⇧D, the button, and the configurable command.
+  expect(appActionForKey(key('D', { metaKey: true, shiftKey: true }))).toBe('split-right');
+  expect(appActionForKey(key('D', { ctrlKey: true, shiftKey: true }))).toBe('close-pane');
   for (const mod of [{ metaKey: true }, { ctrlKey: true }]) {
-    expect(appActionForKey(key('D', { ...mod, shiftKey: true }))).toBe('close-pane');
     expect(appActionForKey(key('{', { ...mod, shiftKey: true }))).toBe('layout-undo');
     expect(appActionForKey(key(']', { ...mod, shiftKey: true }))).toBe('layout-redo');
     expect(appActionForKey(key('˜', { ...mod, altKey: true, code: 'KeyN' }))).toBe('split-add');
@@ -72,4 +74,14 @@ test('R-69 Cmd Shift W A S D は固定枠の四方向に追加し、サイト内
     expect(appActionForKey(key(letter, { metaKey: true, shiftKey: true }))).toBe(action);
     expect(appActionForKey(key(letter, { metaKey: true, shiftKey: true }), true)).toBe(action);
   }
+});
+
+import { nextViewTitle, uniqueViewTitle } from './views';
+test('R-95 新しいビューの名前は一覧にない最小の番号にし、複製名も重複させない', () => {
+  const views = ['ビュー 1', 'ビュー 2', '趣味', 'ビュー 6', 'ビュー 6'].map(title => ({ title }));
+  expect(nextViewTitle(views)).toBe('ビュー 3');
+  expect(nextViewTitle([])).toBe('ビュー 1');
+  expect(nextViewTitle(['ビュー 1', 'ビュー 2', 'ビュー 3'].map(title => ({ title })))).toBe('ビュー 4');
+  expect(uniqueViewTitle(views, '趣味（コピー）')).toBe('趣味（コピー）');
+  expect(uniqueViewTitle([...views, { title: '趣味（コピー）' }], '趣味（コピー）')).toBe('趣味（コピー） 2');
 });

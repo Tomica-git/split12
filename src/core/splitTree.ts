@@ -15,6 +15,16 @@ export function defaultTree(count: number, orientation: Orientation, wideBottom 
   const rows = wideBottom && count === 4 ? [3, 1] : bands[count]!;
   return join(rows.map(n => join(Array.from({ length: n }, () => ({ pane: index++ })), orientation === 'landscape' ? 'x' : 'y')), orientation === 'landscape' ? 'y' : 'x');
 }
+/** One large pane (index 0) beside an even grid of the rest: left in landscape, top in portrait (R-88). */
+export function focusTree(count: number, orientation: Orientation): SplitTree {
+  if (!Number.isInteger(count) || count < 1 || count > MAX_PANES) throw new RangeError('Invalid count');
+  if (count === 1) return { pane: 0 };
+  const shift = (node: SplitTree): SplitTree => 'pane' in node ? { pane: node.pane + 1 } : { ...node, first: shift(node.first), second: shift(node.second) };
+  // The rest share the narrow side, so their bands run across it.
+  const rest = shift(defaultTree(count - 1, orientation === 'landscape' ? 'portrait' : 'landscape'));
+  const ratio = count <= 3 ? 2 / 3 : count <= 5 ? .6 : .5;
+  return { axis: orientation === 'landscape' ? 'x' : 'y', ratio, first: { pane: 0 }, second: rest };
+}
 export function measureTree(tree: SplitTree): { panes: Map<number, Box>; dividers: Divider[] } {
   const panes = new Map<number, Box>(); const dividers: Divider[] = [];
   function walk(node: SplitTree, box: Box, path: string): void {

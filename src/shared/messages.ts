@@ -5,7 +5,7 @@ export type SplitRequest =
   | { type: 'split/register' }
   | { type: 'split/create' }
   | { type: 'views/register' | 'views/list' | 'views/create' }
-  | { type: 'views/focus'; id: string }
+  | { type: 'views/focus'; id: string; slot?: number }
   | { type: 'views/rename'; id: string; title: string }
   | { type: 'views/delete'; id: string; expectedTabIds: number[] }
   | { type: 'views/reorder'; ids: string[] }
@@ -17,7 +17,7 @@ export type SplitRequest =
   | { type: 'allowlist/add' | 'allowlist/remove'; hosts: string[] }
   | { type: 'service-worker/clear'; url: string };
 export type SplitResponse =
-  | { ok: true; tabId?: number; hosts?: string[]; views?: ViewSummary[]; templates?: LayoutTemplate[]; forkUrl?: string }
+  | { ok: true; tabId?: number; hosts?: string[]; views?: ViewSummary[]; templates?: LayoutTemplate[]; forkUrl?: string; created?: string; navigate?: string }
   | { ok: false; reason: string; tabId?: number };
 export type AddUrlMessage = { type: 'pane/add-url'; url: string; tabId: number; confirmLoad?: boolean; axis?: 'x' | 'y'; before?: boolean; frameId?: number; link?: boolean };
 export type AppActionMessage = { type: 'app/action'; tabId: number; action: AppAction; frameId?: number; at?: number };

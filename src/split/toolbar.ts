@@ -2,7 +2,7 @@ import { MAX_PANES, type Orientation } from '../core/layout';
 import { text } from '../ui/strings';
 
 export function createToolbar(actions: {
-  count(value: number): void; orientation(value: Orientation): void; settings(): void; shortcuts(): void; preset(): void; split(axis: 'x' | 'y', before?: boolean): void; newView(): void; guide(): void; undo(): void; redo(): void; sidebar(): void; templates(): void; templateShortcut(index: number): void; toggleToolbar(): void; paneList(): void;
+  count(value: number): void; orientation(value: Orientation): void; settings(): void; shortcuts(): void; preset(): void; focus(): void; split(axis: 'x' | 'y', before?: boolean): void; newView(): void; guide(): void; undo(): void; redo(): void; sidebar(): void; templates(): void; templateShortcut(index: number): void; toggleToolbar(): void; paneList(): void;
 }): { element: HTMLElement; update(count: number, orientation: Orientation): void; history(undo: boolean, redo: boolean): void; currentView(name: string): void } {
   const bar = document.createElement('header');
   bar.className = 'toolbar';
@@ -16,7 +16,7 @@ export function createToolbar(actions: {
     </div>
     <button type="button" class="toolbar-action undo" aria-label="${text.undo}" title="${text.undo}" disabled>↶</button><button type="button" class="toolbar-action redo" aria-label="${text.redo}" title="${text.redo}" disabled>↷</button><button type="button" class="toolbar-action pane-list-open">一覧</button>
     <div class="toolbar-group direction-group" role="group" aria-label="並び方"><div class="segmented direction-buttons"></div></div>
-    <div class="toolbar-spacer"></div><button type="button" class="toolbar-action preset" title="上3枚と下1枚">3＋1</button><button type="button" class="toolbar-action templates" aria-haspopup="dialog">${text.templates}</button><div class="toolbar-template-shortcuts" role="group" aria-label="テンプレートショートカット"><button type="button" class="toolbar-action template-shortcut" aria-label="テンプレートショートカット 1">1</button><button type="button" class="toolbar-action template-shortcut" aria-label="テンプレートショートカット 2">2</button><button type="button" class="toolbar-action template-shortcut" aria-label="テンプレートショートカット 3">3</button></div>
+    <div class="toolbar-spacer"></div><button type="button" class="toolbar-action focus-layout" title="選択中の枠を大きくし、残りを均等に並べる">1枚を大きく</button><button type="button" class="toolbar-action preset" title="上3枚と下1枚">3＋1</button><button type="button" class="toolbar-action templates" aria-haspopup="dialog">${text.templates}</button><div class="toolbar-template-shortcuts" role="group" aria-label="テンプレートショートカット"><button type="button" class="toolbar-action template-shortcut" aria-label="テンプレートショートカット 1">1</button><button type="button" class="toolbar-action template-shortcut" aria-label="テンプレートショートカット 2">2</button><button type="button" class="toolbar-action template-shortcut" aria-label="テンプレートショートカット 3">3</button></div>
     <div class="toolbar-help"><button type="button" class="toolbar-action guide">${text.guide}</button><button type="button" class="toolbar-action settings" aria-label="${text.settings}">⚙ <span>${text.settings}</span></button></div>`;
   const countInput = bar.querySelector<HTMLInputElement>('.count-input')!;
   const minus = bar.querySelector<HTMLButtonElement>('.count-minus')!;
@@ -47,6 +47,7 @@ export function createToolbar(actions: {
   bar.querySelectorAll<HTMLButtonElement>('.template-shortcut').forEach((button, index) => button.addEventListener('click', () => actions.templateShortcut(index)));
   bar.querySelector('.sidebar-toggle')!.addEventListener('click', actions.sidebar);
   bar.querySelector('.preset')!.addEventListener('click', actions.preset);
+  bar.querySelector('.focus-layout')!.addEventListener('click', actions.focus);
   bar.querySelector('.split-x')!.addEventListener('click', () => actions.split('x'));
   bar.querySelector('.split-y')!.addEventListener('click', () => actions.split('y'));
   bar.querySelector('.split-left')!.addEventListener('click', () => actions.split('x', true));

@@ -154,26 +154,38 @@ test('Chrome で変更したショートカットをページ内から使用す�
   await expect(split.getByRole('spinbutton', { name: '表示数', exact: true })).toHaveValue('6');
 });
 
-test('ペイン内の新規タブリンクを新しいペインに開く', async ({ split, context }) => {
+// R-11 / R-19 (0.1.93f): links that open a new tab stay normal tabs; the split view does not capture them.
+test('R-11 ペイン内の新規タブリンクは通常のタブのまま残し枠を増やさない', async ({ split, context }) => {
   await openUrl(split, 0, site('a', `/link?new=1&to=${encodeURIComponent(site('a', '/page2'))}`));
   await expect(pane(split, 0).locator('iframe')).toHaveCSS('pointer-events', 'auto');
   await moveIntoFrame(split, 0);
+  const pages = context.pages().length;
   const opened = context.waitForEvent('page');
   await pane(split, 0).frameLocator('iframe').getByTestId('link').click();
   const original = await opened;
-  await expect(split.getByRole('spinbutton', { name: '表示数', exact: true })).toHaveValue('5');
-  await expect(pane(split, 4).frameLocator('iframe').getByTestId('marker')).toHaveText('page2');
-  await expect.poll(() => original.isClosed()).toBe(true);
+  await expect(original).toHaveURL(site('a', '/page2'));
+  await expect(original.getByTestId('marker')).toHaveText('page2');
+  await split.waitForTimeout(1000); // Any background handler has run by now; nothing may capture or close the tab.
+  await expect(split.getByRole('spinbutton', { name: '表示数', exact: true })).toHaveValue('4');
+  await expect(pane(split, 4)).toBeHidden();
+  expect(original.isClosed()).toBe(false);
+  expect(context.pages()).toHaveLength(pages + 1);
+  await expect(pane(split, 0).frameLocator('iframe').getByTestId('marker')).toHaveText('link');
 });
 
-test('ペイン内リンクを Command クリックして新しいペインを増やす', async ({ split }) => {
+test('R-11 ペイン内リンクを Command クリックしても枠は増えず通常のタブで開く', async ({ split, context }) => {
   await openUrl(split, 0, site('a', `/link?to=${encodeURIComponent(site('a', '/page2'))}`));
   const frame = pane(split, 0).frameLocator('iframe');
   await expect(frame.getByTestId('marker')).toHaveText('link');
   await moveIntoFrame(split, 0);
+  const opened = context.waitForEvent('page');
   await frame.getByTestId('link').click({ modifiers: ['Meta'] });
-  await expect(split.getByRole('spinbutton', { name: '表示数', exact: true })).toHaveValue('5');
-  await expect(pane(split, 4).frameLocator('iframe').getByTestId('marker')).toHaveText('page2');
+  const tab = await opened;
+  await expect(tab).toHaveURL(site('a', '/page2'));
+  await split.waitForTimeout(500);
+  await expect(split.getByRole('spinbutton', { name: '表示数', exact: true })).toHaveValue('4');
+  await expect(frame.getByTestId('marker')).toHaveText('link');
+  expect(tab.isClosed()).toBe(false);
 });
 
 test('ペイン内リンクの右クリックがページに届きメニューを妨げない', async ({ split }) => {
@@ -203,53 +215,21 @@ test('ペイン内のポップアップウィンドウはそのまま開く', as
   await expect.poll(() => popup.isClosed()).toBe(false);
 });
 
-test('追加先の読み込みに失敗したら元の新規タブを閉じない', async ({ split, context }) => {
-  await openUrl(split, 0, site('a', `/link?new=1&to=${encodeURIComponent(site('a', '/drop'))}`));
+// The three capture-and-close scenarios (failed load, slow page, foregrounded tab) collapse into this one:
+// with no capture, the new tab is never closed, however its page loads.
+test('R-11 新しいタブで開いた遅いページも取り込まず、読み込みが終わってもタブを閉じない', async ({ split, context }) => {
+  await openUrl(split, 0, site('a', `/link?new=1&to=${encodeURIComponent(site('a', '/slow'))}`));
   const frame = pane(split, 0).frameLocator('iframe');
   await expect(frame.getByTestId('marker')).toHaveText('link');
   await moveIntoFrame(split, 0);
   const opened = context.waitForEvent('page');
   await frame.getByTestId('link').click();
   const original = await opened;
-  await expect(pane(split, 4).getByText(/読み込みに失敗しました/)).toBeVisible();
+  await expect(original.getByTestId('marker')).toHaveText('slow');
   await split.waitForTimeout(1000);
   expect(original.isClosed()).toBe(false);
-});
-
-test('遅いページの準備中は元の新規タブを残し、表示後に閉じる', async ({ split, context }) => {
-  await openUrl(split, 0, site('a', `/link?new=1&to=${encodeURIComponent(site('a', '/slow'))}`));
-  const frame = pane(split, 0).frameLocator('iframe');
-  await expect(frame.getByTestId('marker')).toHaveText('link');
-  await moveIntoFrame(split, 0);
-  const opened = context.waitForEvent('page');
-  await frame.getByTestId('link').click();
-  const original = await opened;
-  await expect(split.getByRole('spinbutton', { name: '表示数', exact: true })).toHaveValue('5');
-  expect(original.isClosed()).toBe(false);
-  await expect(pane(split, 4).frameLocator('iframe').getByTestId('marker')).toHaveText('slow');
-  await expect.poll(() => original.isClosed()).toBe(true);
-});
-
-test('利用者が新規タブを前面にした場合は読み込み成功後も閉じない', async ({ split, context }) => {
-  let releaseLoad!: () => void;
-  let markLoadIntercepted!: () => void;
-  const waitForForeground = new Promise<void>(resolve => { releaseLoad = resolve; });
-  const loadIntercepted = new Promise<void>(resolve => { markLoadIntercepted = resolve; });
-  await split.route('**/slow', async route => { markLoadIntercepted(); await waitForForeground; await route.continue(); });
-  await openUrl(split, 0, site('a', `/link?new=1&to=${encodeURIComponent(site('a', '/slow'))}`));
-  const frame = pane(split, 0).frameLocator('iframe');
-  await expect(frame.getByTestId('marker')).toHaveText('link');
-  await moveIntoFrame(split, 0);
-  const opened = context.waitForEvent('page');
-  await frame.getByTestId('link').click();
-  const original = await opened;
-  await expect(split.getByRole('spinbutton', { name: '表示数', exact: true })).toHaveValue('5');
-  await loadIntercepted;
-  await original.bringToFront();
-  releaseLoad();
-  await expect(pane(split, 4).frameLocator('iframe').getByTestId('marker')).toHaveText('slow');
-  await split.waitForTimeout(1000); // Verify that the asynchronous completion handler leaves the tab open.
-  expect(original.isClosed()).toBe(false);
+  await expect(split.getByRole('spinbutton', { name: '表示数', exact: true })).toHaveValue('4');
+  await expect(pane(split, 4)).toBeHidden();
 });
 
 test('ショートカットで表示数を増減する', async ({ split }) => {

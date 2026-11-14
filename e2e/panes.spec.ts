@@ -149,10 +149,14 @@ test('S-02 未許可の入れ子 iframe の XFO 保護は残る', async ({ split
   await expect(frame.frameLocator('iframe').getByTestId('marker')).toHaveCount(0);
 });
 test('R-09 レイアウト変更直後に閉じても最後の状態を保存する', async ({ split, context, extensionId, sw }) => {
+  // R-75 / R-90 drop a view whose 12 panes are all empty when its last tab closes, so one pane holds a page.
+  await openUrl(split, 0, site('a', '/plain?keep-layout'));
+  await expect(pane(split, 0).frameLocator('iframe').getByTestId('marker')).toHaveText('plain');
   await split.getByRole('spinbutton', { name: '表示数', exact: true }).fill('7'); await split.getByRole('spinbutton', { name: '表示数', exact: true }).press('Enter');
   await split.close();
   await expect.poll(async () => sw.evaluate(async () => (await chrome.storage.session.get('splitTabId')).splitTabId)).toBeUndefined();
   const reopened = await context.newPage();
   await reopened.goto(`chrome-extension://${extensionId}/split.html`);
   await expect(reopened.getByRole('spinbutton', { name: '表示数', exact: true })).toHaveValue('7');
+  await expect(pane(reopened, 0).getByRole('combobox', { name: 'アドレス' })).toHaveValue(site('a', '/plain?keep-layout'));
 });

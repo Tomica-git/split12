@@ -1,5 +1,6 @@
 import type { AddressSuggestion } from '../core/suggestions';
 import { text } from '../ui/strings';
+import { normalizeUserUrl } from '../core/url';
 
 export function createAddressSuggestions(input: HTMLInputElement, id: string, suggest: (value: string) => AddressSuggestion[] | Promise<AddressSuggestion[]>, choose: (item: AddressSuggestion) => void) {
   const list = document.createElement('div'); list.id = id; list.className = 'address-suggestions'; list.hidden = true;
@@ -21,7 +22,8 @@ export function createAddressSuggestions(input: HTMLInputElement, id: string, su
   function accept(index: number): void { const item = items[index]; if (!item) return; close(); choose(item); }
   function refresh(): void {
     clearTimeout(timer); const own = ++generation, value = input.value;
-    if (composing || document.activeElement !== input || !value.trim()) { close(); return; }
+    // Suggestions follow the text being composed too (R-99); keys stay with the IME until compositionend.
+    if (document.activeElement !== input || !value.trim()) { close(); return; }
     if (value !== shownValue) {
       items = []; active = -1; list.hidden = true;
       input.setAttribute('aria-expanded', 'false'); input.removeAttribute('aria-activedescendant');
@@ -30,10 +32,12 @@ export function createAddressSuggestions(input: HTMLInputElement, id: string, su
     timer = setTimeout(() => {
       timer = undefined;
       void Promise.resolve().then(() => suggest(value)).then(result => {
-        if (own !== generation || input.value !== value || document.activeElement !== input || composing) return;
+        if (own !== generation || input.value !== value || document.activeElement !== input) return;
         awaiting = false;
         const previous = shownValue === value && !list.hidden && active >= 0 ? items[active] : undefined;
         items = result; active = previous ? items.findIndex(item => item.kind === previous.kind && item.url === previous.url) : -1; shownValue = value;
+        // Words that are not an address preselect the visible Google search row, so Enter searches (R-82).
+        if (active < 0 && !normalizeUserUrl(value)) active = items.findIndex(item => item.kind === 'search');
         list.replaceChildren(...items.map((item, index) => {
           const row = document.createElement('div'); row.id = `${id}-${index}`; row.className = 'address-suggestion'; row.setAttribute('role', 'option'); row.setAttribute('aria-selected', 'false');
           const label = document.createElement('strong'), detail = document.createElement('small'); label.textContent = item.label; detail.textContent = item.detail; row.append(label, detail);
@@ -44,7 +48,7 @@ export function createAddressSuggestions(input: HTMLInputElement, id: string, su
     }, 80);
   }
   input.addEventListener('input', refresh); input.addEventListener('focus', refresh); input.addEventListener('blur', close);
-  input.addEventListener('compositionstart', () => { composing = true; close(); }); input.addEventListener('compositionend', () => { composing = false; refresh(); });
+  input.addEventListener('compositionstart', () => { composing = true; }); input.addEventListener('compositionend', () => { composing = false; refresh(); });
   input.addEventListener('keydown', event => {
     if (event.isComposing || composing || event.keyCode === 229) return;
     if (event.key === 'Escape' && (awaiting || !list.hidden)) { event.preventDefault(); event.stopImmediatePropagation(); close(); return; }

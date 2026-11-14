@@ -1,5 +1,5 @@
 import { normalizeDisplayName } from '../core/names';
-import { parseViewRegistry, parseViewTombstones, validViewId, viewIdFromUrl, viewWorkspaceKey, type ViewRecord, type ViewSummary } from '../core/views';
+import { nextViewTitle, parseViewRegistry, parseViewTombstones, uniqueViewTitle, validViewId, viewIdFromUrl, viewWorkspaceKey, type ViewRecord, type ViewSummary } from '../core/views';
 
 type Hooks = { tabIds(): Promise<number[]>; isSplitUrl(value: string | undefined): boolean; remember(id: number): Promise<void>; apply(): Promise<void>; serial<T>(work: () => Promise<T>): Promise<T> };
 export function setupViews(hooks: Hooks): void {
@@ -16,14 +16,34 @@ export function setupViews(hooks: Hooks): void {
     const ids = new Set(items.map(item => item.id));
     for (const key of Object.keys(stored)) {
       const id = key === 'workspace' ? 'main' : key.startsWith('workspace:') ? key.slice(10) : null;
-      if (validViewId(id) && !deleted.has(id) && !ids.has(id)) { items.push({ id, title: `ビュー ${items.length + 1}`, createdAt: Date.now() }); ids.add(id); }
+      if (validViewId(id) && !deleted.has(id) && !ids.has(id)) { items.push({ id, title: nextViewTitle(items), createdAt: Date.now() }); ids.add(id); }
     }
     for (const tab of await openViews()) {
       const id = tabView(tab);
-      if (!deleted.has(id) && !ids.has(id)) { items.push({ id, title: `ビュー ${items.length + 1}`, createdAt: Date.now() }); ids.add(id); }
+      if (!deleted.has(id) && !ids.has(id)) { items.push({ id, title: nextViewTitle(items), createdAt: Date.now() }); ids.add(id); }
+    }
+    // A view that no tab shows and whose 12 panes are all empty is not kept (R-90).
+    const shown = new Set((await chrome.tabs.query({})).flatMap(tab => [tab.url, tab.pendingUrl]).filter(url => hooks.isSplitUrl(url)).map(url => viewIdFromUrl(url!)));
+    const now = Date.now();
+    for (const [id, at] of fresh) if (now - at > 60000) fresh.delete(id);
+    const empty = items.filter(item => !shown.has(item.id) && !fresh.has(item.id) && emptyState(stored[viewWorkspaceKey(item.id)]));
+    if (empty.length && deleted.size + empty.length <= 10000) {
+      for (const item of empty) deleted.add(item.id);
+      const kept = items.filter(item => !deleted.has(item.id));
+      await chrome.storage.local.set({ viewRegistry: { schemaVersion: 1, views: kept }, viewTombstones: { schemaVersion: 1, ids: [...deleted] } });
+      await chrome.storage.local.remove(empty.map(item => viewWorkspaceKey(item.id)));
+      return kept;
     }
     if (JSON.stringify(parseViewRegistry(stored.viewRegistry)) !== JSON.stringify(items)) await chrome.storage.local.set({ viewRegistry: { schemaVersion: 1, views: items } });
     return items;
+  }
+  // Views just created or chosen are about to be shown in the sender's tab; keep them through that switch.
+  const fresh = new Map<string, number>();
+  // Never saved, or saved with all 12 panes blank. A malformed state is kept rather than guessed.
+  function emptyState(raw: unknown): boolean {
+    if (raw === undefined) return true;
+    const panes = (raw as { panes?: unknown } | null)?.panes;
+    return Array.isArray(panes) && panes.length === 12 && panes.every(pane => (pane as { url?: unknown } | null)?.url === '');
   }
   const summaries = (items: ViewRecord[], tabs: chrome.tabs.Tab[]): ViewSummary[] => items.map(item => {
     const tabIds = tabs.filter(tab => tabView(tab) === item.id).flatMap(tab => tab.id === undefined ? [] : [tab.id]);
@@ -50,21 +70,23 @@ export function setupViews(hooks: Hooks): void {
       const currentId = viewIdFromUrl(sender.url!);
       const deleted = parseViewTombstones((await chrome.storage.local.get('viewTombstones')).viewTombstones);
       if (deleted.has(currentId)) return { ok: false, reason: 'deleted-view' };
+      // Once the new or chosen view shows in its tab, the usual empty-view rule applies to it again.
+      if (message.type === 'views/register') fresh.delete(currentId);
       if (message.type === 'views/register') {
         const closing = ((await chrome.storage.session.get('closingViews')).closingViews ?? {}) as Record<string, { id?: unknown; empty?: unknown }>;
         if (closing[current.id!]) { delete closing[current.id!]; await chrome.storage.session.set({ closingViews: closing }); }
       }
       if (message.type === 'views/create') {
-        const titles = new Set(items.map(item => item.title));
-        let number = 1;
-        while (titles.has(`ビュー ${number}`)) number++;
-        items.push({ id: crypto.randomUUID(), title: `ビュー ${number}`, createdAt: Date.now() });
+        const id = crypto.randomUUID();
+        items.push({ id, title: nextViewTitle(items), createdAt: Date.now() });
+        fresh.set(id, Date.now());
         await chrome.storage.local.set({ viewRegistry: { schemaVersion: 1, views: items } });
-        return { ok: true, views: summaries(items, tabs) };
+        // Open it at once in this same tab: one Split12 per window (R-93), and an empty view nobody shows is removed (R-90).
+        return { ok: true, created: id, navigate: `${base}?view=${id}`, views: summaries(items, tabs) };
       }
       if (message.type === 'views/register' && tabs.some(tab => tab.id !== current.id && tabView(tab) === currentId)) {
         const id = crypto.randomUUID(), state = (await chrome.storage.local.get(viewWorkspaceKey(currentId)))[viewWorkspaceKey(currentId)];
-        items.push({ id, title: `ビュー ${items.length + 1}（コピー）`, createdAt: Date.now() });
+        items.push({ id, title: uniqueViewTitle(items, `${items.find(item => item.id === currentId)?.title ?? nextViewTitle(items)}（コピー）`), createdAt: Date.now() });
         await chrome.storage.local.set({ ...(state ? { [viewWorkspaceKey(id)]: state } : {}), viewRegistry: { schemaVersion: 1, views: items } });
         return { ok: true, forkUrl: `${base}?view=${id}` };
       }
@@ -81,11 +103,17 @@ export function setupViews(hooks: Hooks): void {
         if (!validViewId(message.id) || deleted.has(message.id) || !items.some(item => item.id === message.id)) return { ok: false, reason: 'unknown-view' };
         if (message.type === 'views/focus') {
           const existing = tabs.find(tab => tabView(tab) === message.id);
-          if (existing?.id !== undefined) { await chrome.tabs.update(existing.id, { active: true }); await chrome.windows.update(existing.windowId, { focused: true }); }
-          else {
-            const created = await chrome.tabs.create({ url: message.id === 'main' ? base : `${base}?view=${message.id}`, active: true, windowId: current.windowId, index: current.index + 1 });
-            if (created.id === undefined) return { ok: false, reason: 'tab-not-created' };
-            await hooks.remember(created.id); await hooks.apply();
+          // A pane picked in another view's list opens maximized there (R-96).
+          const slot = Number.isInteger(message.slot) && message.slot >= 0 && message.slot < 12 ? message.slot as number : undefined;
+          if (existing?.id !== undefined) {
+            await chrome.tabs.update(existing.id, { active: true }); await chrome.windows.update(existing.windowId, { focused: true });
+            if (slot !== undefined) await chrome.tabs.sendMessage(existing.id, { type: 'view/focus-pane', viewId: message.id, slot }, { frameId: 0 }).catch(() => undefined);
+          } else {
+            // Switch this Split12 tab to the chosen view instead of adding a second one to the window (R-93).
+            fresh.set(message.id, Date.now());
+            const url = new URL(message.id === 'main' ? base : `${base}?view=${message.id}`);
+            if (slot !== undefined) url.searchParams.set('focus', String(slot));
+            return { ok: true, navigate: url.href, views: summaries(items, tabs) };
           }
         } else if (message.type === 'views/rename') {
           const title = normalizeDisplayName(message.title, 80);

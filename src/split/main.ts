@@ -1,11 +1,11 @@
 import { normalizeHost } from '../core/host';
 import { MAX_PANES, type Orientation } from '../core/layout';
-import { defaultTree, insertPaneAt, measureTree, movePaneToDivider, movePaneToSide, removePane, splitPane, swapPanes, type PaneSide, type SplitTree } from '../core/splitTree';
+import { defaultTree, focusTree, insertPaneAt, measureTree, movePaneToDivider, movePaneToSide, removePane, splitPane, swapPanes, type PaneSide, type SplitTree } from '../core/splitTree';
 import { flipDividers } from '../core/dividerOperations';
 import { findJunctions, type Junction } from '../core/junctions';
 import { snapDividers, snapJunction, type SnapGuide } from '../core/snap';
 import { parseTemplateShape, shapeFromWorkspace, treeForOrder, type TemplateShape } from '../core/templates';
-import { addressSuggestions, type AddressSource } from '../core/suggestions';
+import { addressSuggestions, type AddressSource, type HistorySource } from '../core/suggestions';
 import { closeWorkspacePane, mapTree, OperationHistory, workspaceTree } from '../core/workspaceOperations';
 import { matchesShortcut } from '../core/shortcuts';
 import { appActionForKey, isAppAction, zoomActionForKey, type AppAction } from '../core/appActions';
@@ -81,6 +81,24 @@ function scheduleTabChoices(): void {
 function shownUrls(): string[] {
   return workspaceOrder(workspace).slice(0, workspace.count).map(slot => workspace.panes[slot]!.url).filter(Boolean);
 }
+// Chrome's own history, read locally (R-98). The default window is the last day, so the whole history is asked for.
+async function historySources(value: string): Promise<HistorySource[]> {
+  const needle = value.trim().replace(/^https?:\/\//i, '').replace(/^www\./i, '').slice(0, 200);
+  if (!needle || !chrome.history?.search) return [];
+  try {
+    const items = await chrome.history.search({ text: needle, maxResults: 100, startTime: 0 });
+    return items.filter(item => isOpenableUrl(item.url)).map(item => ({ url: item.url!, title: item.title || undefined, visitCount: item.visitCount, typedCount: item.typedCount, lastVisitTime: item.lastVisitTime }));
+  } catch { return []; }
+}
+// Close the tab a page was moved from, only if it still shows that page and is an ordinary, unpinned tab (R-94).
+async function closeMovedTab(choice: TabChoice): Promise<void> {
+  if (choice.tabId === undefined) return;
+  try {
+    const tab = await chrome.tabs.get(choice.tabId), self = await chrome.tabs.getCurrent();
+    if (tab.id === self?.id || tab.pinned || tab.url !== choice.url || (tab.pendingUrl && tab.pendingUrl !== choice.url)) return;
+    await chrome.tabs.remove(choice.tabId);
+  } catch { /* Already closed or changed. */ }
+}
 // Empty panes list the window's own tabs so a page can be picked without typing its address.
 async function refreshTabChoices(): Promise<void> {
   const generation = ++tabChoicesGeneration;
@@ -94,7 +112,7 @@ async function refreshTabChoices(): Promise<void> {
     seen.add(tab.url);
     const icon = tab.favIconUrl && /^(?:https?|data):/i.test(tab.favIconUrl) ? tab.favIconUrl : undefined;
     const host = normalizeHost(tab.url) ?? new URL(tab.url).hostname;
-    choices.push({ url: tab.url, title: tab.title || tab.url, host, icon });
+    choices.push({ url: tab.url, title: tab.title || tab.url, host, icon, tabId: tab.id });
   }
   for (const pane of panes) { pane.renderTabs(choices); pane.refreshSuggestions(); }
 }
@@ -124,7 +142,7 @@ async function allow(url: string): Promise<void> {
 const paneCallbacks = {
   state: (index: number) => workspace.panes[index]!, changed,
   preparationChanged: save,
-  suggest: (value: string) => addressSuggestions(value, [...workspace.panes.map(pane => ({ url: pane.url })), ...addressTabs, ...[...savedAddresses.values()].flat()]),
+  suggest: async (value: string) => addressSuggestions(value, [...workspace.panes.map(pane => ({ url: pane.url })), ...addressTabs, ...[...savedAddresses.values()].flat()], await historySources(value)),
   select: (index: number) => selectPane(index),
   maximize: (index: number) => { maximized = maximized === index ? null : index; if (maximized !== null) maximizeActivatedAt = Date.now(); renderLayout(); },
   allow,
@@ -137,6 +155,7 @@ const paneCallbacks = {
     commitLayout(() => { workspace.layout = swapPanes(workspaceTree(workspace), from, to); });
   },
   numberDrag: beginNumberDrag,
+  closeSourceTab: (choice: TabChoice) => { void closeMovedTab(choice); },
   close: closePane,
   canClose: () => !viewDeleted,
   context: showPaneMenu,
@@ -187,6 +206,8 @@ function beginNumberDrag(slot: number, event: PointerEvent, button: HTMLButtonEl
   if (numberDrag) numberDrag();
   const startX = event.clientX, startY = event.clientY;
   let moved = false;
+  // Cover the pages from the press on: otherwise a fast first move lands in a page frame and the release never arrives here (R-92).
+  app.classList.add('pointer-shield');
   const preview = document.createElement('div'); preview.className = 'number-drop-preview'; preview.hidden = true; preview.setAttribute('aria-hidden', 'true'); grid.append(preview);
   const sideAt = (x: number, y: number): { kind: 'pane'; slot: number; side: PaneSide } | { kind: 'outer'; side: PaneSide } | undefined => {
     if (maximized !== null) return;
@@ -220,6 +241,8 @@ function beginNumberDrag(slot: number, event: PointerEvent, button: HTMLButtonEl
   };
   const move = (next: PointerEvent) => {
     if (next.pointerId !== event.pointerId) return;
+    // A release that reached another frame still ends the drag at the next move here (R-92).
+    if (!(next.buttons & 1)) { up(next); return; }
     if (!moved && Math.hypot(next.clientX - startX, next.clientY - startY) < 4) return;
     moved = true; app.classList.add('number-dragging');
     const junction = junctionAtPosition(next.clientX, next.clientY);
@@ -242,7 +265,7 @@ function beginNumberDrag(slot: number, event: PointerEvent, button: HTMLButtonEl
     panes.forEach(pane => pane.element.classList.toggle('drop-target', pane.index === target && target !== slot));
   };
   const cleanup = () => {
-    app.classList.remove('number-dragging'); preview.remove(); panes.forEach(pane => pane.element.classList.remove('drop-target'));
+    app.classList.remove('number-dragging', 'pointer-shield'); preview.remove(); panes.forEach(pane => pane.element.classList.remove('drop-target'));
     document.querySelectorAll('.split-divider.number-drop-target, .split-divider.number-drop-invalid, .split-junction.number-drop-invalid').forEach(element => element.classList.remove('number-drop-target', 'number-drop-invalid'));
     window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); window.removeEventListener('pointercancel', cancel); window.removeEventListener('blur', cancel); window.removeEventListener('resize', cancel);
     document.removeEventListener('visibilitychange', visibility); button.removeEventListener('lostpointercapture', cancel); numberDrag = undefined;
@@ -358,22 +381,29 @@ function closePane(slot: number): void {
   panes[selected]!.element.focus({ preventScroll: true });
 }
 const paneMenu = document.createElement('div');
-paneMenu.className = 'pane-context-menu'; paneMenu.setAttribute('role', 'menu'); paneMenu.hidden = true;
+paneMenu.className = 'pane-context-menu'; paneMenu.setAttribute('role', 'menu'); paneMenu.setAttribute('aria-label', '枠の操作'); paneMenu.hidden = true;
 document.body.append(paneMenu);
 function showPaneMenu(slot: number, x: number, y: number, numberTarget: boolean): void {
   if (!workspaceOrder(workspace).slice(0, workspace.count).includes(slot)) return;
   paneMenu.replaceChildren();
-  const actions: Array<readonly [string, () => void]> = [];
-  if (numberTarget) actions.push([text.pinPane, () => { workspace.fixedSlot = slot; save(); renderSelected(); }], [text.tabsTitle, () => { void dialogs.tabs(); }]);
+  const actions: Array<readonly [string, () => void, boolean?]> = [];
+  if (numberTarget) {
+    // Pinning stays first so the keyboard-opened menu keeps its first item (R-24).
+    actions.push([text.pinPane, () => { workspace.fixedSlot = slot; save(); renderSelected(); }]);
+    actions.push([maximized === slot ? text.restoreMenu : text.maximizeMenu, () => { selectPane(slot); paneCallbacks.maximize(slot); }]);
+    // Controls the narrow header hides stay reachable from this menu.
+    for (const tool of panes[slot]!.hiddenTools()) actions.push([tool.label, tool.action, tool.disabled]);
+    actions.push([text.tabsTitle, () => { void dialogs.tabs(); }]);
+  }
   actions.push([text.deletePane, () => closePane(slot)], [text.clearPane, () => commitLayout(() => panes[slot]!.clear())]);
-  for (const [label, action] of actions) {
-    const button = document.createElement('button'); button.type = 'button'; button.setAttribute('role', 'menuitem'); button.textContent = label;
+  for (const [label, action, disabled] of actions) {
+    const button = document.createElement('button'); button.type = 'button'; button.setAttribute('role', 'menuitem'); button.textContent = label; button.disabled = Boolean(disabled);
     button.addEventListener('click', () => { paneMenu.hidden = true; if (workspaceOrder(workspace).slice(0, workspace.count).includes(slot)) action(); }); paneMenu.append(button);
   }
   paneMenu.hidden = false;
   const rect = paneMenu.getBoundingClientRect();
   Object.assign(paneMenu.style, { left: `${Math.max(0, Math.min(x, innerWidth - rect.width))}px`, top: `${Math.max(0, Math.min(y, innerHeight - rect.height))}px` });
-  paneMenu.querySelector('button')!.focus();
+  paneMenu.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus();
 }
 document.addEventListener('pointerdown', event => { if (!paneMenu.contains(event.target as Node)) paneMenu.hidden = true; });
 let dragEndTimer: ReturnType<typeof setTimeout> | undefined;
@@ -486,23 +516,43 @@ async function saveUi(patch: Record<string, unknown>): Promise<void> {
   const stored = (await chrome.storage.local.get('ui')).ui;
   await chrome.storage.local.set({ ui: { ...(stored && typeof stored === 'object' ? stored : {}), ...patch, schemaVersion: 1 } });
 }
+// Show one pane of this view maximized, as when a pane is picked from this view's list elsewhere (R-96).
+function focusPane(slot: number): void {
+  if (!Number.isInteger(slot) || !workspaceOrder(workspace).slice(0, workspace.count).includes(slot)) return;
+  selectPane(slot);
+  if (maximized !== slot) paneCallbacks.maximize(slot);
+}
 let creatingView = false;
+let switchingView = false;
+// One Split12 per window (R-93): another view opens in this same tab after this view's last save lands.
+async function switchToView(url: string): Promise<void> {
+  if (switchingView) return;
+  switchingView = true;
+  save();
+  await saves.catch(() => undefined);
+  persistEnabled = false;
+  location.replace(url);
+}
 function newView(): void {
   if (creatingView) return;
   creatingView = true; sidebar.setCreating(true);
   void request({ type: 'views/create' }).then(response => {
     if (!response.ok || !response.views) { showToast('ビューを作成できませんでした'); return; }
-    renderViews(response.views); showToast('ビューを作成しました。一覧で選んで開いてください。');
+    renderViews(response.views);
+    if (response.navigate) void switchToView(response.navigate);
   }).catch(() => showToast('ビューを作成できませんでした')).finally(() => { creatingView = false; sidebar.setCreating(false); });
 }
 const viewDialogs = createViewDialogs();
+// Open a view from the session list; with a slot, that pane is shown maximized there (R-96).
+async function sidebarFocus(id: string, slot?: number): Promise<void> {
+  const response = await request({ type: 'views/focus', id, ...(slot === undefined ? {} : { slot }) });
+  if (!response.ok) showToast(response.reason);
+  else if (response.navigate) await switchToView(response.navigate);
+}
 const sidebar = createSidebar({
   currentId: viewId,
   create: newView,
-  focus: async id => {
-    const response = await request({ type: 'views/focus', id });
-    if (!response.ok) showToast(response.reason);
-  },
+  focus: id => sidebarFocus(id),
   rename: view => {
     void (async () => {
       const title = await viewDialogs.rename(view); if (title === null) return;
@@ -544,7 +594,7 @@ const sidebar = createSidebar({
       if (view.id === viewId) { paneList.open(workspace, view.title, true); return; }
       const key = viewWorkspaceKey(view.id);
       const stored = await chrome.storage.local.get(key);
-      paneList.open(parseWorkspace(stored[key]), view.title, false);
+      paneList.open(parseWorkspace(stored[key]), view.title, false, view.id);
     })().catch(() => showToast('一覧を開けませんでした。'));
   },
   closeSidebar: toggleSidebar,
@@ -623,6 +673,11 @@ const toolbar = createToolbar({
   count: changeCount,
   orientation: (orientation: Orientation) => commitLayout(() => { workspace.orientation = orientation; workspace.layout = mapTree(defaultTree(workspace.count, orientation), workspaceOrder(workspace)); }),
   preset: () => commitLayout(() => { changeCount(4); workspace.orientation = 'landscape'; workspace.layout = mapTree(defaultTree(4, 'landscape', true), workspaceOrder(workspace)); }),
+  focus: () => commitLayout(() => {
+    const visible = workspaceOrder(workspace).slice(0, workspace.count);
+    const big = visible.includes(selected) ? selected : visible[0]!;
+    workspace.layout = mapTree(focusTree(workspace.count, workspace.orientation), [big, ...visible.filter(slot => slot !== big)]);
+  }),
   split: (axis, before) => splitSelected(workspaceFixed(workspace), axis, before),
   newView, sidebar: toggleSidebar,
   settings: () => dialogs.settings(),
@@ -641,7 +696,7 @@ const toolbar = createToolbar({
   undo: () => travelLayout(false), redo: () => travelLayout(true),
   paneList: () => paneList.open(workspace, '現在のビュー', true),
 });
-const paneList = createPaneList({ current: () => workspace, close: closePane, clear: slot => commitLayout(() => panes[slot]!.clear()), maximize: slot => { selectPane(slot); paneCallbacks.maximize(slot); }, reorder: (from, to) => {
+const paneList = createPaneList({ openOther: (id, slot) => { void sidebarFocus(id, slot); }, current: () => workspace, close: closePane, clear: slot => commitLayout(() => panes[slot]!.clear()), maximize: slot => { selectPane(slot); paneCallbacks.maximize(slot); }, reorder: (from, to) => {
   const order = workspaceOrder(workspace), before = order.slice(0, workspace.count);
   const start = before.indexOf(from), end = before.indexOf(to);
   if (start < 0 || end < 0 || start === end) return;
@@ -1128,9 +1183,11 @@ function beginJunctionDrag(event: PointerEvent, point: Junction, handle: HTMLBut
   const startX = event.clientX, startY = event.clientY;
   let moved = false;
   activeJunctionKey = key;
+  app.classList.add('pointer-shield');
   applyGeometry();
   const move = (next: PointerEvent) => {
     if (next.pointerId !== event.pointerId) return;
+    if (!(next.buttons & 1)) { up(next); return; }
     if (!moved && Math.hypot(next.clientX - startX, next.clientY - startY) < 3) return;
     moved = true; grid.classList.add('resizing');
     const result = snapJunction(base, point, (next.clientX - startX) / rect.width, (next.clientY - startY) / rect.height, rect.width, rect.height, next.altKey);
@@ -1138,7 +1195,7 @@ function beginJunctionDrag(event: PointerEvent, point: Junction, handle: HTMLBut
     applyGeometry();
   };
   const cleanup = () => {
-    grid.classList.remove('resizing'); showSnapGuides([]); window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); window.removeEventListener('pointercancel', cancel); window.removeEventListener('blur', cancel); window.removeEventListener('resize', cancel);
+    grid.classList.remove('resizing'); app.classList.remove('pointer-shield'); showSnapGuides([]); window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); window.removeEventListener('pointercancel', cancel); window.removeEventListener('blur', cancel); window.removeEventListener('resize', cancel);
     handle.removeEventListener('lostpointercapture', cancel); dividerDrag = undefined; activeJunctionKey = undefined;
     if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId);
   };
@@ -1167,7 +1224,10 @@ function beginDividerDrag(event: PointerEvent, path: string, handle: HTMLButtonE
   if (!dividerSelection.has(path)) { dividerSelection.clear(); dividerAxis = undefined; applyGeometry(); }
   const before = captureLayout(), rect = grid.getBoundingClientRect(), startX = event.clientX, startY = event.clientY;
   let moved = false;
+  app.classList.add('pointer-shield');
   const move = (next: PointerEvent) => {
+    if (next.pointerId !== event.pointerId) return;
+    if (!(next.buttons & 1)) { up(); return; }
     if (!moved && Math.hypot(next.clientX - startX, next.clientY - startY) < 3) return;
     moved = true; grid.classList.add('resizing');
     const delta = divider.axis === 'x' ? (next.clientX - startX) / rect.width : (next.clientY - startY) / rect.height;
@@ -1176,7 +1236,7 @@ function beginDividerDrag(event: PointerEvent, path: string, handle: HTMLButtonE
     applyGeometry();
   };
   const cleanup = () => {
-    grid.classList.remove('resizing'); showSnapGuides([]); window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); window.removeEventListener('pointercancel', cancel); window.removeEventListener('blur', cancel); window.removeEventListener('resize', cancel);
+    grid.classList.remove('resizing'); app.classList.remove('pointer-shield'); showSnapGuides([]); window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); window.removeEventListener('pointercancel', cancel); window.removeEventListener('blur', cancel); window.removeEventListener('resize', cancel);
     handle.removeEventListener('lostpointercapture', cancel); dividerDrag = undefined;
     if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId);
   };
@@ -1285,6 +1345,11 @@ async function init(): Promise<void> {
   setSidebarVisible(ui?.schemaVersion === 1 && ui.sidebarVisible === true);
   renderLayout();
   void refreshTabChoices();
+  const focusParam = new URL(location.href).searchParams.get('focus');
+  if (focusParam !== null) {
+    const clean = new URL(location.href); clean.searchParams.delete('focus'); history.replaceState(null, '', clean.href);
+    focusPane(Number(focusParam));
+  }
   const pending = new URL(location.href).searchParams.get('add');
   if (pending !== null) {
     const clean = new URL(location.href); const axis = clean.searchParams.get('axis'); const before = clean.searchParams.get('before') === '1'; const link = clean.searchParams.get('link') === '1'; clean.searchParams.delete('add'); clean.searchParams.delete('axis'); clean.searchParams.delete('before'); clean.searchParams.delete('link');
@@ -1336,6 +1401,11 @@ let additions: Promise<unknown> = Promise.resolve();
 let ready: Promise<void>;
 chrome.runtime.onMessage.addListener((message: AddUrlMessage | AppActionMessage | { type: 'pane/title'; tabId: number; frameId: number; title: string; url: string } | { type: 'view/deleted'; viewId: string } | { type: 'pane/activate'; tabId: number; frameId: number; at: number } | { type: 'pane/change-count'; tabId: number; delta: number; source?: 'page' } | { type: 'pane/drag-state'; tabId: number; active: boolean; startedHere?: boolean; at: number } | { type: 'pane/drop-url'; tabId: number; frameId: number; nested: boolean; uriList: string; html: string; plain: string; x: number; y: number; shift: boolean; at: number } | { type: 'pane/link-drop'; tabId: number; frameId: number; nested: boolean; id: number; url: string; x: number; y: number; at: number } | { type: 'pane/link-drag'; tabId: number; frameId: number; nested: boolean; id: number; url: string; title: string; at: number }, sender, sendResponse) => {
   if (sender.id !== chrome.runtime.id) return;
+  if ((message as { type?: string })?.type === 'view/focus-pane') {
+    const focus = message as unknown as { viewId: string; slot: number };
+    if (!sender.tab && focus.viewId === viewId) focusPane(focus.slot);
+    return;
+  }
   if (message?.type === 'view/deleted') {
     if (!sender.tab && message.viewId === viewId) { viewDeleted = true; persistEnabled = false; void saves.catch(() => undefined).then(() => sendResponse({ ok: true })); return true; }
     return;

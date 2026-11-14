@@ -370,7 +370,8 @@ test('R-24 開いている枠メニューは対象が削除されると閉じる
   await pane(split, 2).getByRole('combobox', { name: 'アドレス' }).click();
   await pane(split, 2).locator('.pane-number').click({ button: 'right' });
   await expect(split.getByRole('menuitem', { name: '固定タブに選択' })).toBeVisible();
-  await split.keyboard.press('Meta+Shift+d');
+  // R-69: ⌘⇧D now adds to the right; Ctrl⇧D deletes the selected pane.
+  await split.keyboard.press('Control+Shift+d');
   await expect(split.getByRole('spinbutton', { name: '表示数', exact: true })).toHaveValue('3');
   await expect(split.getByRole('menuitem', { name: '固定タブに選択' })).toBeHidden();
 });

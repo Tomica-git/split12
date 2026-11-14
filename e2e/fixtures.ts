@@ -62,8 +62,8 @@ export async function createNewView(page: Page): Promise<void> {
   const sidebar = page.getByRole('complementary', { name: 'セッション' });
   const rows = sidebar.locator('.view-choice');
   const count = await rows.count();
-  await sidebar.getByRole('button', { name: '新しいビュー', exact: true }).click();
+  // R-93 (0.2.0): one Split12 per window, so 追加 now switches this tab. A second view open at the same time lives in
+  // another window (pressing the action button in a window without Split12). Open such a window with a new view here.
+  await page.evaluate(() => chrome.windows.create({ url: `${chrome.runtime.getURL('split.html')}?view=${crypto.randomUUID()}`, focused: true, type: 'normal' }));
   await expect(rows).toHaveCount(count + 1);
-  await rows.last().click();
-  await sidebar.locator('.view-open').click();
 }

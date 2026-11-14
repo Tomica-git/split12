@@ -1,14 +1,14 @@
 import { normalizeHost } from '../core/host';
 import { canGoBack, canGoForward, emptyHistory, paneHistory, type PaneHistory } from '../core/paneHistory';
 import { isOpenableUrl, lacksDomain, normalizeUserUrl } from '../core/url';
-import { ZOOMS, type PaneState, type Zoom } from '../core/workspace';
+import { ZOOMS, stepZoom, type PaneState, type Zoom } from '../core/workspace';
 import { text } from '../ui/strings';
 import { isAuthenticationHost, isNoteLoginPage } from '../core/auth';
 import { googleHostnameSearchUrl, googleSearchUrl } from '../core/search';
 import type { AddressSuggestion } from '../core/suggestions';
 import { createAddressSuggestions } from './addressSuggestions';
 
-export interface TabChoice { url: string; title: string; host: string; icon?: string }
+export interface TabChoice { url: string; title: string; host: string; icon?: string; tabId?: number }
 export interface PaneCallbacks {
   state(index: number): PaneState;
   changed(index: number, patch: Partial<PaneState>): void;
@@ -24,7 +24,8 @@ export interface PaneCallbacks {
   close(index: number): void;
   canClose(): boolean;
   context(index: number, x: number, y: number, numberTarget: boolean): void;
-  suggest(value: string): AddressSuggestion[];
+  closeSourceTab(choice: TabChoice): void;
+  suggest(value: string): AddressSuggestion[] | Promise<AddressSuggestion[]>;
 }
 const SANDBOX = 'allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads';
 const PERMISSIONS = 'fullscreen; autoplay; clipboard-write; encrypted-media; picture-in-picture';
@@ -67,18 +68,27 @@ export class Pane {
     el.setAttribute('aria-label', `ペイン ${index + 1}`);
     el.innerHTML = `
       <div class="pane-bar">
-        <img class="pane-favicon" alt="" aria-hidden="true" hidden>
+        <img class="pane-favicon" alt="" aria-hidden="true" draggable="false" hidden>
         <button type="button" class="pane-number" draggable="false" aria-haspopup="menu">${String(index + 1).padStart(2, '0')}</button>
+        <button type="button" class="icon pane-menu" aria-haspopup="menu" aria-label="${text.paneMenu}" title="${text.paneMenu}"><svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true" focusable="false"><path d="M3 4.5 6 7.5 9 4.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
         <button type="button" class="icon back" aria-label="${text.back}" title="${text.back}">‹</button>
         <button type="button" class="icon forward" aria-label="${text.forward}" title="${text.forward}">›</button>
         <button type="button" class="icon reload" aria-label="${text.reload}" title="${text.reload}">↻</button>
         <input class="address" aria-label="${text.address}" placeholder="${text.addressPlaceholder}" spellcheck="false" autocomplete="off">
         <div class="zoom-wrap"><button type="button" class="zoom" aria-label="${text.zoom}" aria-expanded="false">100%</button><div class="zoom-menu" hidden></div></div>
-        <button type="button" class="icon move-window" aria-label="新しいタブで開く" title="このページを新しいタブで開く">↪</button>
+        <button type="button" class="icon move-window" aria-label="このページを新しいタブで開く" title="このページを新しいタブで開く">↪</button>
         <button type="button" class="icon close" aria-label="${text.close}" title="${text.close}">×</button>
       </div>
       <div class="pane-view">
-        <div class="empty"><div class="tab-picker" role="list" aria-label="${text.openTabs}"></div><p class="tab-picker-none">${text.emptyDescription}</p></div>
+        <div class="empty">
+          <div class="empty-mark" aria-hidden="true">＋</div>
+          <strong class="empty-title">${text.emptyTitle}</strong>
+          <button type="button" class="empty-address">${text.emptyAddress}</button>
+          <p class="empty-tabs-heading" hidden>${text.emptyTabsHeading}</p>
+          <div class="tab-picker" role="list" aria-label="${text.openTabs}"></div>
+          <p class="tab-picker-none">${text.emptyDescription}</p>
+          <p class="empty-drop">${text.emptyDrop}</p>
+        </div>
         <div class="overlay" hidden></div>
       </div>`;
     this.element = el;
@@ -113,7 +123,7 @@ export class Pane {
     el.addEventListener('contextmenu', event => {
       if (!(event.target instanceof Element) || !event.target.closest('.pane-bar')) return;
       if (event.target.closest('input,textarea,[contenteditable]')) return;
-      const numberTarget = Boolean(event.target.closest('.pane-number'));
+      const numberTarget = Boolean(event.target.closest('.pane-number, .pane-favicon'));
       event.preventDefault();
       callbacks.context(index, event.clientX, event.clientY, numberTarget);
     });
@@ -126,6 +136,23 @@ export class Pane {
     const number = el.querySelector<HTMLButtonElement>('.pane-number')!;
     number.addEventListener('dragstart', event => event.preventDefault());
     number.addEventListener('pointerdown', event => callbacks.numberDrag(index, event, number));
+    // The site icon left of the number is the same handle: drag to swap or move, double-click to maximize (R-87).
+    const favicon = el.querySelector<HTMLImageElement>('.pane-favicon')!;
+    favicon.addEventListener('dragstart', event => event.preventDefault());
+    favicon.addEventListener('pointerdown', event => callbacks.numberDrag(index, event, number));
+    favicon.addEventListener('pointerdown', event => {
+      if (event.button === 0 && event.isPrimary && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey)
+        iconPress = { id: event.pointerId, x: event.clientX, y: event.clientY, moved: false };
+    });
+    // The drag captures the pointer on the number button, so movement is watched at the window.
+    window.addEventListener('pointermove', event => {
+      if (iconPress?.id === event.pointerId && Math.hypot(event.clientX - iconPress.x, event.clientY - iconPress.y) >= 4) iconPress.moved = true;
+    }, true);
+    favicon.addEventListener('dblclick', event => {
+      if (event.button !== 0 || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey || iconPress?.moved) return;
+      callbacks.maximize(index);
+    });
+    let iconPress: { id: number; x: number; y: number; moved: boolean } | undefined;
     // Pointer capture keeps drag tracking on this button even when the pointer leaves it.
     // Remember both presses in a double click so a drag followed by a click cannot maximize.
     let press: { id: number; x: number; y: number; moved: boolean } | undefined;
@@ -161,6 +188,11 @@ export class Pane {
     button('.reload').addEventListener('click', () => this.reload());
     button('.move-window').addEventListener('click', () => { void this.moveToWindow(); });
     button('.close').addEventListener('click', () => callbacks.close(index));
+    button('.empty-address').addEventListener('click', () => { callbacks.select(index); this.input.focus(); this.input.select(); });
+    button('.pane-menu').addEventListener('click', event => {
+      const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+      callbacks.context(index, rect.left, rect.bottom, true);
+    });
     this.zoomButton.addEventListener('click', () => {
       if (!this.zoomMenu.hidden) { this.closeZoom(); return; }
       const current = callbacks.state(index).zoom;
@@ -183,6 +215,13 @@ export class Pane {
     document.addEventListener('pointerdown', event => {
       if (!this.zoomMenu.hidden && !this.zoomMenu.contains(event.target as Node) && event.target !== this.zoomButton) this.closeZoom();
     });
+    // Narrow panes drop header controls in steps; the pane menu offers what is hidden (R-83).
+    new ResizeObserver(() => {
+      const width = el.getBoundingClientRect().width;
+      if (!width) return;
+      const size = width < 200 ? 'xs' : width < 300 ? 's' : width < 420 ? 'm' : 'l';
+      if (el.dataset.size !== size) { el.dataset.size = size; if (size !== 'l') this.closeZoom(); }
+    }).observe(el);
     this.updateButtons();
   }
 
@@ -215,7 +254,7 @@ export class Pane {
     const list = this.empty.querySelector<HTMLElement>('.tab-picker')!;
     list.replaceChildren(...choices.map(choice => {
       const item = document.createElement('button');
-      item.type = 'button'; item.className = 'tab-pick'; item.setAttribute('role', 'listitem'); item.title = choice.url;
+      item.type = 'button'; item.className = 'tab-pick'; item.setAttribute('role', 'listitem'); item.title = `${choice.url}\nこの枠で開き、読み込めたら元のタブを閉じます`;
       const icon = document.createElement('span'); icon.className = 'tab-pick-icon'; icon.setAttribute('aria-hidden', 'true');
       if (choice.icon) icon.append(Object.assign(document.createElement('img'), { src: choice.icon, alt: '' }));
       else icon.textContent = choice.host.charAt(0).toUpperCase();
@@ -223,10 +262,15 @@ export class Pane {
       const title = document.createElement('strong'); title.textContent = choice.title;
       const host = document.createElement('small'); host.textContent = choice.host;
       details.append(title, host); item.append(icon, details);
-      item.addEventListener('click', () => { this.callbacks.select(this.index); void this.openExplicit(choice.url); });
+      // The page moves into this pane: the original Chrome tab closes once the pane has loaded it (R-94).
+      item.addEventListener('click', () => {
+        this.callbacks.select(this.index);
+        void this.openExplicit(choice.url, true).then(loaded => { if (loaded) this.callbacks.closeSourceTab(choice); });
+      });
       return item;
     }));
     list.hidden = !choices.length;
+    this.empty.querySelector<HTMLElement>('.empty-tabs-heading')!.hidden = !choices.length;
     this.empty.querySelector<HTMLElement>('.tab-picker-none')!.hidden = Boolean(choices.length);
   }
   ownsWindow(source: MessageEventSource | null): boolean { return Boolean(source && this.frame?.contentWindow === source); }
@@ -248,6 +292,22 @@ export class Pane {
     this.history = structuredClone(history);
     this.parkedNeedsAllow = needsAllow;
     if (resetFrame) this.destroyFrame();
+  }
+  /** Header controls hidden because the pane is narrow, so the pane menu can offer them instead. */
+  hiddenTools(): Array<{ label: string; disabled: boolean; action: () => void }> {
+    const hidden = (selector: string) => this.element.querySelector<HTMLElement>(selector)!.getClientRects().length === 0;
+    const tools: Array<{ label: string; disabled: boolean; action: () => void }> = [];
+    const hasPage = Boolean(this.callbacks.state(this.index).url);
+    if (hasPage && hidden('.back')) tools.push({ label: text.back, disabled: this.back.disabled, action: () => this.go(-1) }, { label: text.forward, disabled: this.forward.disabled, action: () => this.go(1) });
+    if (hasPage && hidden('.reload')) tools.push({ label: text.reload, disabled: !this.callbacks.state(this.index).url, action: () => this.reload() });
+    const moveWindow = this.element.querySelector<HTMLButtonElement>('.move-window')!;
+    if (hasPage && hidden('.move-window')) tools.push({ label: text.openTab, disabled: moveWindow.disabled, action: () => { void this.moveToWindow(); } });
+    if (hidden('.zoom-wrap')) {
+      const zoom = this.callbacks.state(this.index).zoom;
+      tools.push({ label: `${text.zoomIn}（${Math.round(zoom * 100)}%）`, disabled: zoom >= ZOOMS[0]!, action: () => this.callbacks.changed(this.index, { zoom: stepZoom(zoom, 1) }) },
+        { label: text.zoomOut, disabled: zoom <= ZOOMS.at(-1)!, action: () => this.callbacks.changed(this.index, { zoom: stepZoom(zoom, -1) }) });
+    }
+    return tools;
   }
   pageBack(): void { this.go(-1); }
   pageForward(): void { this.go(1); }

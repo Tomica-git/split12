@@ -135,3 +135,15 @@ describe('R-11 R-12 空きペインの選択', () => {
     expect(targetPane(1, panes)).toBeNull();
   });
 });
+
+import { focusTree as focusTreeForTest, measureTree as measureForFocus } from './splitTree';
+test('R-88 focusTree は先頭の枠を大きくし残りを均等に並べる', () => {
+  for (const [count, orientation] of [[5, 'landscape'], [12, 'landscape'], [4, 'portrait'], [2, 'landscape']] as const) {
+    const panes = measureForFocus(focusTreeForTest(count, orientation)).panes;
+    expect([...panes.keys()].sort((a, b) => a - b)).toEqual(Array.from({ length: count }, (_, i) => i));
+    const big = panes.get(0)!, rest = [...panes.entries()].filter(([slot]) => slot !== 0).map(([, box]) => box);
+    for (const box of rest) expect(box.width * box.height).toBeLessThan(big.width * big.height);
+    if (orientation === 'landscape') { expect(big.x).toBe(0); expect(big.height).toBe(1); } else { expect(big.y).toBe(0); expect(big.width).toBe(1); }
+  }
+  expect(focusTreeForTest(1, 'landscape')).toEqual({ pane: 0 });
+});

@@ -19,7 +19,9 @@ test('R-27 レイアウトテンプレートの保存・新規作成・候補作
 test('R-28 セッション一覧に名前変更と削除の操作がある', async ({ split }) => {
   await split.getByRole('button', { name: 'セッション一覧', exact: true }).click();
   const sidebar = split.getByRole('complementary', { name: 'セッション' });
-  await expect(sidebar.locator('.view-open')).toBeVisible();
+  // R-91: the former 開く button is now 命名 (rename); views open by double-click (R-81).
+  await expect(sidebar.locator('.view-rename')).toBeVisible();
+  await expect(sidebar.locator('.view-open')).toHaveCount(0);
   // R-81: double-click opens a view; renaming is on F2 and the context menu.
   await sidebar.locator('.view-choice').first().focus();
   await sidebar.locator('.view-choice').first().press('F2');

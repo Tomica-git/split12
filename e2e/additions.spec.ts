@@ -48,7 +48,9 @@ test('R-11 隠したページを保持し新規追加では表示数を1だけ�
   await expect(pane(split, 4).frameLocator('iframe').getByTestId('marker')).toHaveText('page2');
   await split.getByRole('spinbutton', { name: '表示数', exact: true }).fill('8'); await split.getByRole('spinbutton', { name: '表示数', exact: true }).press('Enter');
   await expect(pane(split, 5).frameLocator('iframe').getByTestId('marker')).toHaveText('page2');
-  await pane(split, 5).getByRole('button', { name: '戻る', exact: true }).click();
+  // R-83: this pane is 160px wide, so its header hides 戻る and the pane menu offers the same page-back action.
+  await pane(split, 5).getByRole('button', { name: '枠のメニュー' }).click();
+  await split.getByRole('menu', { name: '枠の操作' }).getByRole('menuitem', { name: '戻る', exact: true }).click();
   await expect(pane(split, 5).frameLocator('iframe').getByTestId('marker')).toHaveText('link');
   for (const index of [6, 7]) {
     await expect(pane(split, index).getByRole('combobox', { name: 'アドレス' })).toHaveValue(site('a', `/plain?saved=${index - 1}`));
@@ -119,7 +121,8 @@ test('R-05 R-30 最大化は他のページを保持しエラー時の新規タ�
   await expect(pane(split, 0).getByText(/読み込みに失敗しました/)).toBeVisible();
   await context.unroute(site('a', '/token'));
   const newTab = context.waitForEvent('page');
-  await pane(split, 0).getByRole('button', { name: '新しいタブで開く' }).click();
+  // The error card's button; the header arrow is named 「このページを新しいタブで開く」 (R-45).
+  await pane(split, 0).getByRole('button', { name: '新しいタブで開く', exact: true }).click();
   const opened = await newTab;
   await expect(opened).toHaveURL(site('a', '/token'));
   // R-15 changes × to remove the pane. The explicit clear action retains R-05's original empty-pane contract.
@@ -496,19 +499,18 @@ test('ページの準備中に枠をクリアしたら遅れて復活しない',
   await expect(pane(split, 0).getByRole('combobox', { name: 'アドレス' })).toHaveValue('');
   await expect(pane(split, 0).locator('iframe')).toHaveCount(0);
 });
-test('新規タブの追加先を準備中に隠しても元タブと URL を保持する', async ({ split, context, sw }) => {
+// R-11 (0.1.93f): a link that opens a new tab is not captured, so no allowlist request or pane is prepared for it.
+test('R-11 新規タブで開いたページは許可待ちも枠も作らず、元のタブを保持する', async ({ split, context }) => {
   const url = site('b', '/page2?hidden=1');
   await openUrl(split, 0, site('a', `/link?new=1&to=${encodeURIComponent(url)}`));
   const link = pane(split, 0).frameLocator('iframe').getByTestId('link');
   await expect(link).toBeVisible();
   await split.evaluate(() => {
     const original = chrome.runtime.sendMessage.bind(chrome.runtime);
-    let release!: () => void;
-    const gate = new Promise<void>(resolve => { release = resolve; });
-    const state = window as typeof window & { releaseAllow: () => void; allowWaiting: boolean };
-    state.releaseAllow = release; state.allowWaiting = false;
+    const state = window as typeof window & { allowWaiting: boolean };
+    state.allowWaiting = false;
     chrome.runtime.sendMessage = ((message: unknown) => {
-      if ((message as { type?: string })?.type === 'allowlist/add') { state.allowWaiting = true; return gate.then(() => original(message)); }
+      if ((message as { type?: string })?.type === 'allowlist/add') state.allowWaiting = true;
       return original(message);
     }) as typeof chrome.runtime.sendMessage;
   });
@@ -516,19 +518,11 @@ test('新規タブの追加先を準備中に隠しても元タブと URL を保
   const opened = context.waitForEvent('page');
   await link.click();
   const original = await opened;
-  await expect(split.getByRole('spinbutton', { name: '表示数', exact: true })).toHaveValue('5');
-  await expect.poll(() => split.evaluate(() => (window as typeof window & { allowWaiting: boolean }).allowWaiting)).toBe(true);
-  await split.getByRole('spinbutton', { name: '表示数', exact: true }).fill('4'); await split.getByRole('spinbutton', { name: '表示数', exact: true }).press('Enter');
-  await split.evaluate(() => (window as typeof window & { releaseAllow: () => void }).releaseAllow());
-  await expect.poll(() => sw.evaluate(async () => {
-    const { workspace } = await chrome.storage.local.get('workspace');
-    return (workspace as { panes: Array<{ url: string }> }).panes[4]?.url;
-  })).toBe(url);
-  await expect(pane(split, 4).locator('iframe')).toHaveCount(0);
-  expect(original.isClosed()).toBe(false);
-  await split.getByRole('spinbutton', { name: '表示数', exact: true }).fill('5'); await split.getByRole('spinbutton', { name: '表示数', exact: true }).press('Enter');
-  await expect(pane(split, 4).frameLocator('iframe').getByTestId('marker')).toHaveText('page2');
-  await split.waitForTimeout(1000); // Allow the original-tab completion handler to run.
+  await expect(original).toHaveURL(url);
+  await split.waitForTimeout(1000);
+  await expect(split.getByRole('spinbutton', { name: '表示数', exact: true })).toHaveValue('4');
+  expect(await split.evaluate(() => (window as typeof window & { allowWaiting: boolean }).allowWaiting)).toBe(false);
+  await expect(pane(split, 4)).toBeHidden();
   expect(original.isClosed()).toBe(false);
 });
 test('R-09 R-11 準備中の枠を隠して追加しても両方の URL を保持する', async ({ split, sw }) => {

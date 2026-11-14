@@ -1,4 +1,4 @@
-import { test, expect, openUrl, pane, site } from './fixtures';
+import { test, expect, openUrl, pane, site, createNewView } from './fixtures';
 import type { Locator, Page, Worker } from '@playwright/test';
 
 async function clickInFrame(target: Locator): Promise<void> {
@@ -201,11 +201,10 @@ test('R-18 ビュー一覧から独立ビューを開閉・再開し上下キー
   await split.locator('.toolbar .sidebar-toggle').focus();
   await split.keyboard.press('Meta+b'); await expect(list).toBeHidden();
   await split.keyboard.press('Meta+b'); await expect(list).toBeVisible();
+  // R-93: one Split12 per window, so a second view open at the same time lives in another window.
   const created = context.waitForEvent('page');
-  await split.getByRole('complementary', { name: 'セッション' }).getByRole('button', { name: '新しいビュー', exact: true }).click();
+  await createNewView(split);
   await expect(list.getByRole('button')).toHaveCount(2);
-  await list.getByRole('button').nth(1).click();
-  await split.locator('.view-open').click();
   const second = await created;
   await expect(second.getByRole('spinbutton', { name: '表示数', exact: true })).toHaveValue('4');
   await openUrl(second, 0, site('b', '/page2?second'));
@@ -221,13 +220,16 @@ test('R-18 ビュー一覧から独立ビューを開閉・再開し上下キー
   await expect(list.getByRole('button').nth(0)).toBeFocused();
   await second.close();
   await expect(list.getByRole('button').nth(1)).toContainText('保存済み');
-  const reopened = context.waitForEvent('page');
-  await list.getByRole('button').nth(1).click();
-  await split.locator('.view-open').click();
-  const restored = await reopened;
-  await expect(restored).toHaveURL(url);
-  await expect(pane(restored, 0).frameLocator('iframe').getByTestId('marker')).toHaveText('page2');
-  await expect(pane(split, 0).frameLocator('iframe').getByTestId('token')).toHaveText(token!);
+  // R-91/R-93: a saved view opens by double-click and switches this same tab; no tab is added.
+  const pages = context.pages().length;
+  await list.getByRole('button').nth(1).dblclick();
+  await expect(split).toHaveURL(url);
+  await expect(pane(split, 0).frameLocator('iframe').getByTestId('marker')).toHaveText('page2');
+  expect(context.pages()).toHaveLength(pages);
+  // The view shown before keeps its page and comes back with it.
+  await list.getByRole('button').nth(0).dblclick();
+  await expect(pane(split, 0).getByRole('combobox', { name: 'アドレス' })).toHaveValue(site('a', '/token?main'));
+  expect(token).toBeTruthy();
   await command(sw, split, 'toggle-sidebar');
   await expect(list).toBeHidden();
   await split.reload();
@@ -286,7 +288,8 @@ test('R-17 ネスト内の信頼された削除キーは所有枠を閉じ普通
   const child = pane(split, 1).frameLocator('iframe').frameLocator('iframe').getByTestId('marker');
   await expect(child).toHaveText('plain');
   await clickInFrame(child);
-  await split.keyboard.press('Meta+Shift+D');
+  // R-69 moved ⌘⇧D to 「右に追加」; the delete key that still reaches the view is Ctrl⇧D.
+  await split.keyboard.press('Control+Shift+D');
   await expect(split.getByRole('spinbutton', { name: '表示数', exact: true })).toHaveValue('3');
   await expect(pane(split, 1)).toHaveAttribute('data-slot', '2');
   const normal = await context.newPage(); await normal.goto(site('a', '/plain'));
@@ -398,16 +401,21 @@ test('R-17 最大化中の分割は元の枠の長辺を使い新しい枠を表
   expect(added.x).toBe(first.x); expect(added.y).toBeGreaterThan(first.y);
 });
 
-test('R-19 新規タブの自動取り込みも実際のリンク元の枠を分割する', async ({ split }) => {
+// R-19 (0.1.93f): a normal new tab is not captured, so it splits nothing; the layout and the other page stay.
+test('R-19 R-11 新規タブで開いたリンクは枠を分割せず、配置と元のページを保つ', async ({ split, context }) => {
   await split.getByRole('spinbutton', { name: '表示数', exact: true }).fill('2'); await split.getByRole('spinbutton', { name: '表示数', exact: true }).press('Enter');
   await split.getByRole('button', { name: '横並び', exact: false }).click();
   await openUrl(split, 1, site('a', `/link?new=1&to=${encodeURIComponent(site('b', '/page2?from-second'))}`));
   await openUrl(split, 0, site('a', '/token?keep-first'));
   const token = await pane(split, 0).frameLocator('iframe').getByTestId('token').textContent();
   const original = await pane(split, 0).boundingBox();
+  const opened = context.waitForEvent('page');
   await clickInFrame(pane(split, 1).frameLocator('iframe').getByTestId('link'));
-  await expect(pane(split, 2).frameLocator('iframe').getByTestId('marker')).toHaveText('page2');
+  const tab = await opened;
+  await expect(tab).toHaveURL(site('b', '/page2?from-second'));
+  await split.waitForTimeout(500);
+  await expect(split.getByRole('spinbutton', { name: '表示数', exact: true })).toHaveValue('2');
   expect(await pane(split, 0).boundingBox()).toEqual(original);
-  expect((await pane(split, 2).boundingBox())!.x).toBeGreaterThan(original!.x + original!.width);
   await expect(pane(split, 0).frameLocator('iframe').getByTestId('token')).toHaveText(token!);
+  expect(tab.isClosed()).toBe(false);
 });

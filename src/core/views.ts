@@ -18,3 +18,18 @@ export function parseViewRegistry(value: unknown): ViewRecord[] {
     seen.add(item.id); return true;
   }).map(item => ({ id: item.id, title: item.title.slice(0, 120), createdAt: item.createdAt }));
 }
+/** The smallest 「ビュー N」 no listed view uses, so a new view never repeats a name in the list (R-95). */
+export function nextViewTitle(items: readonly { title: string }[]): string {
+  const titles = new Set(items.map(item => item.title));
+  let number = 1;
+  while (titles.has(`ビュー ${number}`)) number++;
+  return `ビュー ${number}`;
+}
+/** `base` itself when unused, otherwise `base 2`, `base 3` … */
+export function uniqueViewTitle(items: readonly { title: string }[], base: string): string {
+  const titles = new Set(items.map(item => item.title));
+  if (!titles.has(base)) return base;
+  let number = 2;
+  while (titles.has(`${base} ${number}`)) number++;
+  return `${base} ${number}`;
+}

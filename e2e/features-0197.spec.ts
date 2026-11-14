@@ -34,7 +34,8 @@ test('R-62 セッションの右クリックから一覧、名前変更、削除
   await expect(menu.getByRole('menuitem')).toHaveText(['一覧', '名前変更', '削除']);
   await menu.getByRole('menuitem', { name: '一覧' }).click();
   await expect(split.getByRole('dialog', { name: 'タブ一覧' }).getByRole('listitem')).toHaveCount(4);
-  await split.getByRole('button', { name: '一覧を閉じる' }).click();
+  // The sidebar's 「セッション一覧を閉じる」 (R-71) also matches a loose name; close the dialog's own button.
+  await split.getByRole('dialog', { name: 'タブ一覧' }).getByRole('button', { name: '一覧を閉じる' }).click();
   await row.click({ button: 'right' });
   await menu.getByRole('menuitem', { name: '名前変更' }).click();
   await expect(split.getByRole('dialog', { name: 'ビューの名前を変更' })).toBeVisible();
@@ -44,15 +45,22 @@ test('R-62 保存済みの別ビューを開かずに一覧を確認できる', 
   await openSessions(split);
   const side = split.getByRole('complementary', { name: 'セッション' });
   const rows = side.locator('.view-choice');
-  const pageCount = context.pages().length;
+  // R-90/R-93: 追加 switches this tab to a new view, and an empty view left behind is removed, so the view
+  // left behind gets a page first. It then stays as a saved view that is not open anywhere.
+  await openUrl(split, 0, site('a', '/plain?saved-list'));
+  await expect(pane(split, 0).frameLocator('iframe').getByTestId('marker')).toHaveText('plain');
   await side.getByRole('button', { name: '新しいビュー', exact: true }).click();
+  await expect(split).toHaveURL(/view=[a-f\d-]{36}/);
   await expect(rows).toHaveCount(2);
-  await rows.last().click({ button: 'right' });
+  await expect(rows.first()).toContainText('保存済み');
+  const pageCount = context.pages().length, here = split.url();
+  await rows.first().click({ button: 'right' });
   await split.getByRole('menu', { name: 'ビューの操作' }).getByRole('menuitem', { name: '一覧' }).click();
   const dialog = split.getByRole('dialog', { name: 'タブ一覧' });
   await expect(dialog.getByRole('listitem')).toHaveCount(4);
   await expect(dialog.getByRole('button', { name: 'タブ 1 を閉じる' })).toBeDisabled();
   expect(context.pages()).toHaveLength(pageCount);
+  expect(split.url()).toBe(here);
 });
 
 test('R-63 変更可能な戻す・やり直しコマンドが選択ビューの配置に作用する', async ({ split, sw }) => {
